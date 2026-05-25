@@ -1,0 +1,9 @@
+# Runtime config — contains a long-lived PAT. NEVER commit.
+.env
+
+# Common editor + OS noise.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

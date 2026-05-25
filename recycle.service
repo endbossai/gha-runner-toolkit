@@ -1,0 +1,26 @@
+[Unit]
+Description=Daily recycle of the gha-runner-toolkit GitHub Actions runner
+Documentation=https://github.com/endbossai/gha-runner-toolkit/blob/main/docs/architecture.md
+# Run only when Docker is up; otherwise the recycle is a no-op that
+# logs a misleading failure.
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# WorkingDirectory = the toolkit's compose dir on the VPS. The path
+# below assumes the repo is checked out at /opt/gha-runner-toolkit;
+# adjust to wherever you cloned it.
+WorkingDirectory=/opt/gha-runner-toolkit
+ExecStart=/opt/gha-runner-toolkit/recycle.sh
+# Long enough to cover the full drain-then-replace window: 10-min
+# drain timeout + ~30s for compose down/pull/up. The 20-min cap
+# keeps a wedged recycle from hanging systemd indefinitely.
+TimeoutStartSec=1200
+# Output to journal so `journalctl -u recycle.service` shows the
+# recycle log (includes runner-state detection + compose output).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

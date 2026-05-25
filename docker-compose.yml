@@ -1,0 +1,83 @@
+# gha-runner-toolkit — single-service compose for the self-hosted
+# GitHub Actions runner.
+#
+# Deployment:
+#   cp .env.example .env  # fill in PAT, runner name, etc.
+#   docker compose up -d
+#
+# Recycle (optional but recommended for long-running deploys):
+#   See recycle.{sh,service,timer}. Daily 03:00 UTC `docker compose
+#   down && build --pull && up -d` keeps state bounded and base-
+#   image patches current.
+
+services:
+  # The runner agent. Pulled from GHCR (published from this repo's
+  # tags). Pin a specific version in production; `latest` exists but
+  # isn't recommended for environments you care about.
+  #
+  # If you want to build from source locally instead — e.g. for
+  # iterating on the Dockerfile — comment out the `image:` line and
+  # uncomment `build:`. Both shapes work; pick one.
+  runner:
+    image: ghcr.io/endbossai/gha-runner-toolkit:v1.0.0
+    # build:
+    #   context: .
+    container_name: gha-runner
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Testcontainers Ryuk is its "watchdog" sidecar that cleans up
+    # orphan test containers when the parent JVM dies. Ryuk runs on
+    # the host docker daemon and tries to connect BACK to the test
+    # process via a TCP port — which doesn't work when the test
+    # process lives in our runner container (Ryuk's TCP probe can't
+    # cross from host network into the runner's container network).
+    # Disabling Ryuk is the standard fix for docker-out-of-docker
+    # CI setups. Trade-off: a crashed test run can leave testcontainer
+    # sidecars (Postgres, Kafka, etc.) running on the host. Mitigation:
+    # recycle.sh runs `docker container prune` to clear orphans daily.
+    #
+    # TESTCONTAINERS_HOST_OVERRIDE is the other half of the docker-
+    # out-of-docker dance. Testcontainers starts test containers on
+    # the host daemon, and they bind to random high ports on the host.
+    # From inside this runner container, `localhost:<port>` is the
+    # runner itself, not the host — so the JVM under test can't reach
+    # the test containers. The override tells Testcontainers to give
+    # the JVM the host's address. `host.docker.internal` is Docker
+    # Desktop's auto-resolving alias; on Linux VPS hosts where it
+    # doesn't exist by default, the `extra_hosts` mapping below pins
+    # it to the host-gateway IP.
+    environment:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Docker socket mount lets the runner invoke `docker` against the
+    # host's daemon — needed for docker-build workflows + Testcontainers.
+    # SECURITY: anyone running code inside this container effectively
+    # has root on the host via docker. Acceptable for private repos
+    # where committers are trusted; UNSAFE for public repos where
+    # anyone can submit a PR. See README "What you trade off".
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The runner needs the host's docker group GID to write to the
+    # mounted socket. Discover via `getent group docker | cut -d: -f3`
+    # on the host (typical: 999 on Linux, 0 on Docker Desktop).
+    group_add:
+      - "${DOCKER_GID:-999}"
+    # Resource limits keep CI from eating the whole VPS if a workflow
+    # goes wild. Tune to fit the VPS spec — current numbers assume a
+    # 4-vCPU / 8GB box. Using top-level `mem_limit`/`cpus` because the
+    # `deploy.resources.limits` shape is Swarm-mode and older compose
+    # versions silently ignore it outside Swarm.
+    mem_limit: 6g
+    cpus: 3.5
+    # Health: the agent process being alive is the meaningful signal.
+    # `pgrep -x` is exact-match against /proc/<pid>/comm so a log line
+    # or env var containing "Runner.Listener" can't false-positive.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x Runner.Listener > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

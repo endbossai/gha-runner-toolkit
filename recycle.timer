@@ -1,0 +1,23 @@
+[Unit]
+Description=Daily 03:00 UTC trigger for the gha-runner-toolkit recycle
+Documentation=https://github.com/endbossai/gha-runner-toolkit/blob/main/docs/architecture.md
+
+[Timer]
+# 03:00 UTC daily. Chosen because:
+#   - off-peak European working hours (05:00 CET / 04:00 GMT) so
+#     mid-job recycle is unlikely
+#   - off-peak Americas too — no overlap with US/EU business hours
+# To change: edit this OnCalendar line; systemd's calendar format
+# is documented at man systemd.time(7).
+OnCalendar=*-*-* 03:00:00 UTC
+# Persistent=true makes the recycle run on next boot if the host was
+# off at 03:00 UTC. Without this, a missed window stays missed.
+Persistent=true
+# Randomise within a 5-min window. Doesn't really matter for a single
+# host — but if you run multiple, this avoids a synchronised recycle
+# that would dead-zone all runners simultaneously.
+RandomizedDelaySec=5min
+Unit=recycle.service
+
+[Install]
+WantedBy=timers.target
