@@ -20,11 +20,11 @@
 # image is also pinned by digest below; when you bump it, replace
 # the digest with the current published one from Docker Hub.
 
-# ubuntu:24.04 LTS (Noble Numbat). Pinned by digest for reproducibility.
+# ubuntu:26.04 LTS. Pinned by digest for reproducibility.
 # To bump:
-#   docker pull ubuntu:24.04
-#   docker inspect ubuntu:24.04 --format='{{index .RepoDigests 0}}'
-FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+#   docker pull ubuntu:26.04
+#   docker inspect ubuntu:26.04 --format='{{index .RepoDigests 0}}'
+FROM ubuntu:26.04@sha256:f3d28607ddd78734bb7f71f117f3c6706c666b8b76cbff7c9ff6e5718d46ff64
 
 # actions/runner pinned to a specific release. To bump:
 #   1. Pick the desired version from https://github.com/actions/runner/releases
@@ -90,14 +90,14 @@ RUN set -euo pipefail; \
     apt-get install -y --no-install-recommends \
         docker-ce-cli \
         nodejs \
-        libicu74; \
-    # libicu74 is the version Ubuntu 24.04 (Noble) ships, and the
-    # actions/runner agent's installdependencies.sh probes for
-    # libicu52–72 only — silently no-ops on Noble. The runner then
-    # crashes at startup with "Libicu's dependencies is missing for
-    # Dotnet Core 6.0". Installing it explicitly here closes that
-    # gap. When upstream installdependencies.sh learns about
-    # libicu74, this line can move.
+        libicu78; \
+    # libicu78 is the version Ubuntu 26.04 ships. The actions/runner
+    # agent's installdependencies.sh probes for libicu52–72 only and
+    # silently no-ops on anything newer. Without an explicit install
+    # the runner crashes at startup with "Libicu's dependencies is
+    # missing for Dotnet Core 6.0". When upstream installdependencies.sh
+    # learns about ≥73, this line can move. (24.04 needed libicu74 for
+    # the same reason — kept that pattern.)
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
