@@ -4,7 +4,7 @@ A production-grade self-hosted GitHub Actions runner, packaged for the small-tea
 
 Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 VPS and have it just work. Daily container recycle keeps state bounded. The non-obvious gotchas — libicu version skew on Ubuntu LTS, Testcontainers Ryuk + host networking, docker.sock GID discovery, stale-session recovery — are already solved.
 
-> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.2.0` — adds container hardening (`read_only`, dropped capabilities, `no-new-privileges`), auto-detects `DOCKER_GID`, ships richer recycle observability with an optional webhook for drain-timeout alerts. See [Security posture](#security-posture).
+> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.1.1` — adds container hardening (`read_only`, dropped capabilities, `no-new-privileges`), auto-detects `DOCKER_GID`, ships richer recycle observability with an optional webhook for drain-timeout alerts, plus `RUNNER_SCOPE` for org / enterprise registration. Base image bumped to Ubuntu 26.04. See [Security posture](#security-posture).
 >
 > See [Versioning](#versioning) for the tagging scheme; [Upgrading](#upgrading) for the bump procedure.
 
