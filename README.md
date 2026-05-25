@@ -4,7 +4,7 @@ A production-grade self-hosted GitHub Actions runner, packaged for the small-tea
 
 Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 VPS and have it just work. Daily container recycle keeps state bounded. The non-obvious gotchas — libicu74 on Ubuntu 24.04, Testcontainers Ryuk + host networking, docker.sock GID discovery, stale-session recovery — are already solved.
 
-> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.1.0`
+> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.2.0` — adds container hardening (`read_only`, dropped capabilities, `no-new-privileges`), auto-detects `DOCKER_GID`, ships richer recycle observability with an optional webhook for drain-timeout alerts. See [Security posture](#security-posture).
 >
 > See [Versioning](#versioning) for the tagging scheme; [Upgrading](#upgrading) for the bump procedure.
 
@@ -18,6 +18,7 @@ Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 V
   - [Multi-runner across hosts](#multi-runner-across-hosts)
 - [Configuration reference](#configuration-reference)
 - [Verifying the deployment](#verifying-the-deployment)
+- [Security posture](#security-posture)
 - [What you get](#what-you-get) / [What you trade off](#what-you-trade-off)
 - [Versioning](#versioning) + [Upgrading](#upgrading)
 - [Troubleshooting](#troubleshooting)
@@ -29,11 +30,12 @@ Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 V
 git clone https://github.com/endbossai/gha-runner-toolkit /opt/gha-runner-toolkit
 cd /opt/gha-runner-toolkit
 cp .env.example .env && nano .env       # PAT, repo coords, RUNNER_NAME
-echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
 docker compose up -d
 docker compose logs -f runner            # wait for "Listening for Jobs"
 sudo cp recycle.{service,timer} /etc/systemd/system/ && sudo systemctl enable --now recycle.timer
 ```
+
+> **Upgrading from 1.1?** `DOCKER_GID` is now auto-detected from the mounted socket on every container start — you can delete that line from `.env`. It stays as a documented fallback if you ever need it (see [Configuration reference](#optional-knobs)).
 
 Your repo's **Settings → Actions → Runners** should now show the runner as **Idle**. Workflows with `runs-on: [self-hosted, linux, <your-label>]` will land on it.
 
@@ -50,29 +52,14 @@ Your repo's **Settings → Actions → Runners** should now show the runner as *
    cd /opt/gha-runner-toolkit
    ```
 
-2. **Configure `.env`.** Copy the template and fill it in. The required values are `GITHUB_PAT`, `GITHUB_OWNER`, `GITHUB_REPO`, `RUNNER_NAME`, `RUNNER_LABELS`, `DOCKER_GID`. See [Configuration reference](#configuration-reference) for what each does + the optional knobs.
+2. **Configure `.env`.** Copy the template and fill it in. The required values are `GITHUB_PAT`, `GITHUB_OWNER`, `GITHUB_REPO`, `RUNNER_NAME`, `RUNNER_LABELS`. Everything else is optional with sensible defaults. See [Configuration reference](#configuration-reference) for the full list.
 
    ```sh
    cp .env.example .env
    nano .env
    ```
 
-3. **Discover the host's docker group GID** and pin it as `DOCKER_GID` in `.env`. This is the #1 install-time gotcha — without it, the runner gets "permission denied" on the docker socket and restart-loops.
-
-   | Host | Typical `DOCKER_GID` |
-   |---|---|
-   | Ubuntu / Debian VPS | `999` (sometimes `998`) |
-   | Docker Desktop on macOS / Windows | `0` (root-owned socket in the VM) |
-
-   Discover the actual value:
-
-   ```sh
-   getent group docker | cut -d: -f3        # on the host
-   # — OR after a failed first start: —
-   docker exec gha-runner stat -c '%g' /var/run/docker.sock
-   ```
-
-4. **Start the runner.** First start pulls the image (~500MB compressed); subsequent recycles reuse the local cache.
+3. **Start the runner.** First start pulls the image (~500MB compressed); subsequent recycles reuse the local cache.
 
    ```sh
    docker compose up -d
@@ -146,16 +133,18 @@ All settings live in `.env` next to the compose file. `.env.example` carries the
 | `GITHUB_REPO` | Repo name (without the owner prefix). |
 | `RUNNER_NAME` | Stable identifier shown in the repo's Actions → Runners settings. Unique per registered instance. |
 | `RUNNER_LABELS` | Comma-separated labels workflows can target via `runs-on: [self-hosted, linux, <label>]`. `self-hosted`, `Linux`, `X64` are added automatically. |
-| `DOCKER_GID` | Host's docker group GID. See [Compose deploy](#compose-deploy) step 3. |
 
 ### Optional knobs
 
 | Variable | Default | What it does |
 |---|---|---|
+| `DOCKER_GID` | _auto-detected_ | Host's docker group GID. Auto-detected from the mounted socket at start time (v1.2+); set this only if auto-detect fails. Discover via `getent group docker \| cut -d: -f3` on the host. Typical: `999` on Linux, `0` on Docker Desktop. |
 | `CONTAINER_NAME` | `gha-runner` | Override when running multiple instances on one host (each must be unique). Must match the compose file's `container_name`. |
 | `RECYCLE_DRAIN_TIMEOUT_SECONDS` | `600` | Hard ceiling for waiting on an in-flight job before forcing recycle. Bump if your jobs routinely exceed 10 min. |
 | `RECYCLE_DRAIN_POLL_SECONDS` | `30` | How often we re-query the GitHub API for busy-state during drain. |
 | `RECYCLE_PRUNE_FILTER` | `until=24h` | Filter for the post-recycle `docker container prune`. Set `until=0` to skip prune entirely; tighten on disk-pressure hosts. |
+| `RECYCLE_NOTIFY_WEBHOOK` | _unset_ | If set, POST a JSON payload to this URL when the daily drain exceeds `RECYCLE_DRAIN_TIMEOUT_SECONDS` (i.e. a long-running job got force-stopped). Body: `{event, summary, runner, repo, container, timeout_seconds, timestamp}`. Wire into Slack/Discord/Teams inbound webhooks. |
+| `RECYCLE_API_MAX_FAILURES` | `3` | How many consecutive GitHub API failures during drain before we stop trusting the API for this recycle and fall back to log-grep. Bump on flaky links; lower for fail-fast posture. |
 
 ---
 
@@ -171,11 +160,52 @@ If any of these are off, jump to [Troubleshooting](#troubleshooting).
 
 ---
 
+## Security posture
+
+v1.2 ships container hardening that collapses the blast radius of a compromised workflow step. The four primitives, all set in `docker-compose.yml`:
+
+| Hardening | What it does |
+|---|---|
+| `read_only: true` | Container's writable layer is sealed. Anything a workflow writes outside the declared tmpfs mounts (`/runner`, `/tmp`, `/home/runner`) hits a read-only filesystem and fails immediately. |
+| `no-new-privileges: true` | Prevents `execve` from granting any new privilege bits. Setuid binaries can't elevate. |
+| `cap_drop: [ALL]` | Drops every Linux capability the kernel grants by default. |
+| `cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]` | Re-adds only the four caps the entrypoint and typical workflow steps need (privilege drop via `setpriv`, `chown` of the populated `/runner` tmpfs, `tar -p` extraction during `actions/setup-java` & friends). |
+
+The agent's mutable state (`.runner`, `.credentials`, `_work/`, `_diag/`) lives on the `/runner` tmpfs — populated from the image-baked `/opt/runner-dist` by the entrypoint on each container start. Daily recycle wipes the tmpfs along with everything else.
+
+### What this does NOT fix
+
+**The Docker socket is still mounted.** A workflow with effective socket access can spawn a privileged sibling container and pwn the host. No amount of capability dropping inside _this_ container changes that.
+
+The socket mount is non-negotiable for the use case: workflows that build/push docker images, plus Testcontainers in a docker-out-of-docker setup, both require it.
+
+### Public repositories: don't
+
+This toolkit is built for **private repos where committers are trusted**. On a public repo, anyone who can submit a PR can run arbitrary code on your VPS via the docker socket. The hardening above does not change that calculus.
+
+If you must run self-hosted on a public repo:
+
+- Require approval for first-time contributors' workflow runs (Settings → Actions → General → "Require approval for first-time contributors" or stricter).
+- Restrict the runner to a label that only your trusted workflows use; do NOT add it as a default in `runs-on`.
+- Consider an ephemeral-runner pattern (one container per job, container destroyed on completion) — out of scope for this toolkit; see [actions-runner-controller](https://github.com/actions/actions-runner-controller).
+- Audit the workflow YAML in every PR before you let CI touch it.
+
+The author runs this on private repos only. Use on public repos at your own risk.
+
+### Auto-detected `DOCKER_GID`
+
+The entrypoint stats `/var/run/docker.sock` at start time to discover the host's docker group GID, then uses `setpriv` to drop to the `runner` user with that GID added as a supplementary group. No `usermod`, no writable `/etc/group`, no operator-tuned `DOCKER_GID` in `.env` for the common case.
+
+If auto-detection fails (socket not mounted, exotic stat failures), the entrypoint logs a warning and falls back to `DOCKER_GID` from `.env`. With nothing set, the docker CLI inside workflows won't have access to the socket and will fail loudly.
+
+---
+
 ## What you get
 
 - **Containerised** — runner agent lives in a Docker container. The container's filesystem dies daily; no long-tail state accumulates.
-- **Daily recycle** — systemd timer drains (≤10 min waiting on in-flight job, via the GitHub API's `busy` field) then `docker compose down && compose pull && compose up -d`. Bounds disk growth and picks up the latest published image automatically.
-- **Drain-then-replace** — GitHub-API-based busy check is unforgeable; a malicious workflow can't fake "idle" via its stdout. Log-grep fallback if the API is unreachable.
+- **Hardened by default (v1.2)** — `read_only: true`, `cap_drop: ALL` with a four-cap allowlist, `no-new-privileges`, agent state on tmpfs. See [Security posture](#security-posture).
+- **Daily recycle** — systemd timer drains (≤10 min waiting on in-flight job, via the GitHub API's `busy` field) then `docker compose down && compose pull && compose up -d`. Bounds disk growth and picks up the latest published image automatically. Optional webhook fires on drain-timeout.
+- **Drain-then-replace** — GitHub-API-based busy check is unforgeable; a malicious workflow can't fake "idle" via its stdout. Per-status error classification (401, 403, 5xx, etc.); log-grep fallback after `RECYCLE_API_MAX_FAILURES` API errors.
 - **Bounded state** — Gradle / Maven / Docker layer caches live inside the container, die with it. Worst case: one day's worth of caches.
 - **Supply-chain pinned** — `ubuntu:24.04` by digest, `actions/runner` by version + SHA256 verification on the tarball. Bumps ride a deliberate Dockerfile edit, not a runtime auto-update.
 - **Pre-installed**: Docker CLI (talks to mounted host socket), Node ≥ 20, git, curl, jq. JDKs aren't baked — `actions/setup-java` in workflows handles version selection and caches inside the container's day-long lifetime.
@@ -183,8 +213,9 @@ If any of these are off, jump to [Troubleshooting](#troubleshooting).
 ## What you trade off
 
 - **Single point of failure** — one runner, one host. If the VPS reboots, jobs queue. Mitigate by running a second runner with the same label (see [Multi-runner](#multi-runner-on-one-host)).
-- **Mid-job recycle ceiling** — a job that exceeds `RECYCLE_DRAIN_TIMEOUT_SECONDS` past the recycle window gets hard-stopped. 03:00 UTC is off-peak for most teams; tune the timer / timeout if not.
-- **Docker socket mount = root on the host** — a workflow with effective socket access can pwn the host. Acceptable on **private repos** where you trust the committers. **Do not use this on a public repo without further hardening** — anyone who can submit a PR can run arbitrary code on your VPS.
+- **Mid-job recycle ceiling** — a job that exceeds `RECYCLE_DRAIN_TIMEOUT_SECONDS` past the recycle window gets hard-stopped. 03:00 UTC is off-peak for most teams; tune the timer / timeout if not. Wire up `RECYCLE_NOTIFY_WEBHOOK` to get pinged when this happens.
+- **Docker socket mount = root on the host** — a workflow with effective socket access can pwn the host, regardless of any in-container hardening. Acceptable on **private repos** where you trust the committers. **Do not use this on a public repo without further hardening** — anyone who can submit a PR can run arbitrary code on your VPS. See [Security posture → Public repositories: don't](#public-repositories-dont).
+- **Tmpfs sizing** — the agent's writable paths live in RAM-backed tmpfs (collapses cleanly with the daily recycle). Workflows that check out very large repos or generate multi-GB build artifacts may run into OOM before they hit disk. Bump container `mem_limit` (in compose) and the tmpfs sizes together if you need more headroom.
 - **No auto-update** — runner-agent version is pinned in the image. GitHub deprecates old agents periodically; we bump via release. Trade-off accepted in exchange for supply-chain hygiene.
 
 ---

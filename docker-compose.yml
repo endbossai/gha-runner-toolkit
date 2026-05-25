@@ -19,7 +19,7 @@ services:
   # iterating on the Dockerfile — comment out the `image:` line and
   # uncomment `build:`. Both shapes work; pick one.
   runner:
-    image: ghcr.io/endbossai/gha-runner-toolkit:1.1.0
+    image: ghcr.io/endbossai/gha-runner-toolkit:1.2.0
     # build:
     #   context: .
     # CONTAINER_NAME from .env (default `gha-runner`). Override when
@@ -29,6 +29,52 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # ────────────────────────────────────────────────────────────
+    # Security hardening (v1.2). These four primitives together
+    # collapse the blast radius of a compromised workflow step:
+    #
+    # `read_only: true` — the container's writable layer is sealed.
+    #   The agent's mutable state (.runner, .credentials, _work,
+    #   _diag) goes to the tmpfs mount at /runner, populated from
+    #   the image-baked /opt/runner-dist by the entrypoint on each
+    #   start. Anything a workflow writes outside the declared
+    #   tmpfs mounts hits a read-only FS and fails immediately.
+    #
+    # `no-new-privileges: true` — prevents `execve` from granting
+    #   any new privilege bits (setuid binaries can't elevate).
+    #   With cap_drop: ALL there's not much to elevate to anyway,
+    #   but this closes the gap if a setuid binary slips into the
+    #   image via a future package update.
+    #
+    # `cap_drop: ALL` + `cap_add: [CHOWN, SETUID, SETGID,
+    #   DAC_OVERRIDE]` — drop every Linux capability and add back
+    #   the bare minimum the entrypoint and typical workflow steps
+    #   need:
+    #     - SETUID, SETGID — setpriv in entrypoint drops to runner
+    #       user with the docker GID added as a supplementary group
+    #     - CHOWN — entrypoint chowns /runner after populating it
+    #       from /opt/runner-dist; also needed for tar -p extraction
+    #       in workflows (actions/setup-java, etc.)
+    #     - DAC_OVERRIDE — bypasses file mode checks during tar
+    #       extraction when the archive uses unexpected ownership
+    #
+    # WHAT THIS DOES NOT FIX: the docker socket is still mounted
+    # below. A workflow with effective socket access can spawn a
+    # privileged sibling container and pwn the host. Acceptable on
+    # private repos where committers are trusted; UNSAFE on public
+    # repos without further mitigations (see README's "What you
+    # trade off" section).
+    # ────────────────────────────────────────────────────────────
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     # Testcontainers Ryuk is its "watchdog" sidecar that cleans up
     # orphan test containers when the parent JVM dies. Ryuk runs on
     # the host docker daemon and tries to connect BACK to the test
@@ -63,11 +109,32 @@ services:
     # anyone can submit a PR. See README "What you trade off".
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    # The runner needs the host's docker group GID to write to the
-    # mounted socket. Discover via `getent group docker | cut -d: -f3`
-    # on the host (typical: 999 on Linux, 0 on Docker Desktop).
-    group_add:
-      - "${DOCKER_GID:-999}"
+    # tmpfs mounts back the writable paths the agent needs while
+    # the rest of the FS stays read-only:
+    #   /runner       — populated from /opt/runner-dist by entrypoint;
+    #                   holds the agent binary, .runner/.credentials,
+    #                   _work/ (workflow checkout), _diag/ (logs)
+    #   /tmp          — general scratch; many workflows assume writable
+    #   /home/runner  — npm/Gradle/Maven caches (lives for the day,
+    #                   dies with the daily recycle)
+    #
+    # `exec` flag is important: build steps execute scripts copied
+    # under these paths (Gradle wrappers, downloaded JDK binaries
+    # via actions/setup-java, etc.). Default tmpfs is `noexec`.
+    #
+    # Sizes are upper bounds — tmpfs only consumes memory for actual
+    # written bytes, not allocated capacity. The hard ceiling is the
+    # container's `mem_limit` below, so the sum of these can exceed
+    # that and OOM will trigger first.
+    tmpfs:
+      - /runner:size=8g,exec,mode=0755
+      - /tmp:size=1g,exec,mode=1777
+      - /home/runner:size=2g,exec,mode=0755
+    # Docker socket group access is set up by the entrypoint at start
+    # time: it stat's /var/run/docker.sock for the host's docker GID
+    # and uses setpriv to drop to the runner user with that GID added
+    # as a supplementary group. Manual DOCKER_GID in .env remains
+    # available as a fallback if socket detection ever fails.
     # Resource limits keep CI from eating the whole VPS if a workflow
     # goes wild. Tune to fit the VPS spec — current numbers assume a
     # 4-vCPU / 8GB box. Using top-level `mem_limit`/`cpus` because the
