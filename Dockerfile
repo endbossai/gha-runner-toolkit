@@ -49,8 +49,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Ubuntu's /bin/sh is `dash`, which doesn't support `set -o pipefail`.
 # Switching SHELL to bash for the build-time RUNs lets the install
 # scripts use `set -euo pipefail` (fail-fast on apt errors AND on
-# upstream pipeline failures like `curl | gpg --dearmor`).
-SHELL ["/bin/bash", "-c"]
+# upstream pipeline failures like `curl | gpg --dearmor`). The
+# `-o pipefail` in the SHELL directive itself also satisfies
+# hadolint DL4006 (RUN with a pipe in it must have pipefail set).
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Base packages + Docker CLI repo + NodeSource repo, all in one RUN
 # to keep the layer count small and apt cache out of the final image.
@@ -105,11 +107,16 @@ RUN set -euo pipefail; \
 # escalation surface (`sudo docker run --privileged …`).
 RUN useradd --create-home --home-dir ${RUNNER_HOME} --shell /bin/bash --uid 1001 runner
 
+# Set the workdir BEFORE the runner-extraction RUN so we can drop the
+# `cd ${RUNNER_HOME}` inside it (hadolint DL3003: prefer WORKDIR over
+# `cd` in RUN). USER is set further down — we stay root for the
+# extraction so chown can apply.
+WORKDIR ${RUNNER_HOME}
+
 # Download + verify the actions/runner tarball. The SHA256 check is
 # the supply-chain seatbelt — a compromised release at the URL would
 # fail the check rather than land silently.
 RUN set -euo pipefail; \
-    cd ${RUNNER_HOME}; \
     curl -fsSL -o actions-runner.tar.gz \
         "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"; \
     echo "${RUNNER_SHA256}  actions-runner.tar.gz" | sha256sum -c -; \
@@ -131,6 +138,8 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER runner
+# WORKDIR already set above; restating is a no-op but documents the
+# expected runtime cwd at the bottom of the file.
 WORKDIR ${RUNNER_HOME}
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
