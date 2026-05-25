@@ -19,7 +19,7 @@ services:
   # iterating on the Dockerfile — comment out the `image:` line and
   # uncomment `build:`. Both shapes work; pick one.
   runner:
-    image: ghcr.io/endbossai/gha-runner-toolkit:v1.0.0
+    image: ghcr.io/endbossai/gha-runner-toolkit:1.0.0
     # build:
     #   context: .
     container_name: gha-runner

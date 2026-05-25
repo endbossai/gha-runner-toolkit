@@ -58,11 +58,11 @@ Your repo's Settings → Actions → Runners should show the registered runner a
 
 ## Versioning
 
-Semantic versioning. Images are published to `ghcr.io/endbossai/gha-runner-toolkit:vMAJOR.MINOR.PATCH` on every tag.
+Semantic versioning. Images are published to `ghcr.io/endbossai/gha-runner-toolkit:MAJOR.MINOR.PATCH` on every git tag (the `v` prefix from the git tag is stripped per Docker conventions). Rolling tags `:MAJOR.MINOR`, `:MAJOR`, and `:latest` also publish.
 
-- `vMAJOR` — breaking changes to the container interface (env vars, volume mounts, healthcheck contract)
-- `vMINOR` — new features (multi-runner support, new env vars, additional tooling baked in)
-- `vPATCH` — bug fixes, security patches, runner-agent version bumps
+- `MAJOR` — breaking changes to the container interface (env vars, volume mounts, healthcheck contract)
+- `MINOR` — new features (multi-runner support, new env vars, additional tooling baked in)
+- `PATCH` — bug fixes, security patches, runner-agent version bumps
 
 Pin a specific tag in production. `latest` exists but isn't recommended for any environment you care about.
 

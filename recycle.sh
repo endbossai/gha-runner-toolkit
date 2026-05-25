@@ -13,7 +13,7 @@
 #   2. `docker compose down` — SIGTERM, entrypoint trap deregisters.
 #   3. `docker compose pull` — fetch the pinned image's latest manifest
 #      (in case the tag floats, e.g. you used `latest` or a SHA-pinned
-#      moved). For a fully version-pinned `image: ...:v1.0.0` this is
+#      moved). For a fully version-pinned `image: ...:1.0.0` this is
 #      a no-op, which is fine.
 #   4. `docker compose up -d` — new container, fresh registration.
 #

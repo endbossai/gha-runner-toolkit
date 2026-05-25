@@ -2,14 +2,15 @@
 #
 # Tag flow:
 #   1. Land changes on main
-#   2. `git tag v1.x.y && git push --tags`
-#   3. This workflow fires, builds + pushes:
-#        ghcr.io/endbossai/gha-runner-toolkit:v1.x.y
-#        ghcr.io/endbossai/gha-runner-toolkit:v1.x       (rolling minor)
-#        ghcr.io/endbossai/gha-runner-toolkit:v1         (rolling major)
-#        ghcr.io/endbossai/gha-runner-toolkit:latest     (rolling, NOT for prod)
+#   2. `git tag v1.x.y && git push --tags`     (use the `v` prefix on git tags)
+#   3. This workflow fires, builds + pushes (note: docker/metadata-action
+#      strips the `v` per Docker conventions, so image tags are `1.x.y`):
+#        ghcr.io/endbossai/gha-runner-toolkit:1.x.y
+#        ghcr.io/endbossai/gha-runner-toolkit:1.x         (rolling minor)
+#        ghcr.io/endbossai/gha-runner-toolkit:1           (rolling major)
+#        ghcr.io/endbossai/gha-runner-toolkit:latest      (rolling, NOT for prod)
 #
-# Consumers should pin a specific `vMAJOR.MINOR.PATCH` tag in their
+# Consumers should pin a specific `MAJOR.MINOR.PATCH` tag in their
 # docker-compose.yml. The rolling tags exist for easy upgrade paths
 # inside a major; `latest` exists for tinkering only.
 
