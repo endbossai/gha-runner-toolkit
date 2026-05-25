@@ -41,7 +41,7 @@ ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d2
 
 # Tooling versions documented as ARGs so a contributor can see at a
 # glance what the image bakes in.
-ARG NODE_MAJOR=20
+ARG NODE_MAJOR=22
 
 # RUNNER_HOME is the runtime work directory. Under v1.2 it's a tmpfs
 # mount populated from RUNNER_DIST at container start (see entrypoint).
@@ -98,6 +98,14 @@ RUN set -euo pipefail; \
     # missing for Dotnet Core 6.0". When upstream installdependencies.sh
     # learns about ≥73, this line can move. (24.04 needed libicu74 for
     # the same reason — kept that pattern.)
+    # /usr/bin/pebble ships in ubuntu:26.04's base layer as a chiselled-
+    # Ubuntu init / service-manager. It's not dpkg-tracked (bare binary
+    # in the base) and we never invoke it — containers run our entrypoint,
+    # not pebble. Trivy currently flags pebble's bundled Go stdlib
+    # (1.26.2) for 5 HIGH CVEs that aren't fixable from apt; just drop
+    # the binary. When ubuntu:26.04.1 ships pebble rebuilt against go
+    # 1.26.3+, this line can move.
+    rm -f /usr/bin/pebble; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
