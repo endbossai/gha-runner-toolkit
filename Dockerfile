@@ -43,8 +43,15 @@ ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d2
 # glance what the image bakes in.
 ARG NODE_MAJOR=20
 
+# RUNNER_HOME is the runtime work directory. Under v1.2 it's a tmpfs
+# mount populated from RUNNER_DIST at container start (see entrypoint).
+# RUNNER_DIST holds the immutable image-baked copy of the agent
+# binaries — root-readable, owned by `runner`, copied into the tmpfs
+# at start so the agent's mutable state (.runner, .credentials,
+# _diag/, _work/) lives on an ephemeral filesystem.
 ENV DEBIAN_FRONTEND=noninteractive \
-    RUNNER_HOME=/runner
+    RUNNER_HOME=/runner \
+    RUNNER_DIST=/opt/runner-dist
 
 # Ubuntu's /bin/sh is `dash`, which doesn't support `set -o pipefail`.
 # Switching SHELL to bash for the build-time RUNs lets the install
@@ -98,20 +105,31 @@ RUN set -euo pipefail; \
 # recycle should not change that. UID 1001 stays out of the way of
 # the default ubuntu user (UID 1000).
 #
-# Docker socket access is granted at compose-up time via `group_add`
-# (the host's docker GID is added as a supplementary group). No sudo
-# rule is needed — workflow steps that need `docker` invoke it
-# directly and the kernel's group check accepts the call. An earlier
-# draft also had a `NOPASSWD: /usr/bin/docker` sudoers rule; dropped
-# because it's redundant with group_add and would add an unnecessary
-# escalation surface (`sudo docker run --privileged …`).
-RUN useradd --create-home --home-dir ${RUNNER_HOME} --shell /bin/bash --uid 1001 runner
+# `--no-create-home` because RUNNER_HOME is a tmpfs mount at runtime;
+# entrypoint creates the actual directory tree fresh on each start
+# from RUNNER_DIST. Useradd still needs --home-dir set so the runner
+# user's $HOME is RUNNER_HOME (the agent reads $HOME for diag/work
+# paths).
+#
+# Docker socket access is granted by the entrypoint at start time:
+# it stat's /var/run/docker.sock for the host's docker GID and uses
+# setpriv to drop to the runner user with that GID added as a
+# supplementary group. No `group_add` in compose, no usermod at
+# runtime — keeps /etc/group read-only under read_only: true.
+RUN useradd --no-create-home --home-dir ${RUNNER_HOME} --shell /bin/bash --uid 1001 runner
 
-# Set the workdir BEFORE the runner-extraction RUN so we can drop the
-# `cd ${RUNNER_HOME}` inside it (hadolint DL3003: prefer WORKDIR over
-# `cd` in RUN). USER is set further down — we stay root for the
-# extraction so chown can apply.
-WORKDIR ${RUNNER_HOME}
+# Stage the actions/runner tarball into RUNNER_DIST (immutable, image-
+# baked). At runtime the entrypoint copies this to RUNNER_HOME, which
+# is a tmpfs mount so the agent's mutable state files (.runner,
+# .credentials, _work/, _diag/) live on an ephemeral filesystem rather
+# than the container's writable layer (which is read-only under v1.2).
+#
+# hadolint DL3003: prefer WORKDIR over `cd` in RUN — switch here for
+# the extraction, then switch back to RUNNER_HOME at the bottom of
+# the file so the runtime cwd is the tmpfs mount point. WORKDIR
+# creates the directory if it doesn't exist, so no `mkdir -p`
+# needed (and a separate RUN would trip DL3059 anyway).
+WORKDIR ${RUNNER_DIST}
 
 # Download + verify the actions/runner tarball. The SHA256 check is
 # the supply-chain seatbelt — a compromised release at the URL would
@@ -122,24 +140,37 @@ RUN set -euo pipefail; \
     echo "${RUNNER_SHA256}  actions-runner.tar.gz" | sha256sum -c -; \
     tar xzf actions-runner.tar.gz; \
     rm actions-runner.tar.gz; \
-    chown -R runner:runner ${RUNNER_HOME}; \
+    chown -R runner:runner ${RUNNER_DIST}; \
     # The runner's installdependencies.sh installs system deps it
     # needs at runtime. Run it once at build time so the recycled
     # container starts cleanly. (libicu74 was already installed
     # above to work around the Noble gap.)
     bash ./bin/installdependencies.sh
 
-# Entrypoint script handles the per-start dance: mint a fresh
-# registration token via the GitHub API (using the PAT from .env),
-# configure the runner under the configured name + labels, then
-# exec ./run.sh. On SIGTERM (from `docker stop` during recycle),
-# the trap calls config.sh remove so the runner deregisters cleanly.
+# Entrypoint script handles the per-start dance:
+#   1. (root phase) auto-detect host docker GID from the mounted socket,
+#      populate RUNNER_HOME tmpfs from RUNNER_DIST, chown, then drop
+#      privileges to the `runner` user via setpriv with the docker GID
+#      added as a supplementary group.
+#   2. (runner phase) mint a fresh registration token via the GitHub
+#      API (using the PAT from .env), configure the runner under the
+#      configured name + labels, then exec ./run.sh. On SIGTERM
+#      (from `docker stop` during recycle), the trap calls
+#      config.sh remove so the runner deregisters cleanly.
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-USER runner
-# WORKDIR already set above; restating is a no-op but documents the
-# expected runtime cwd at the bottom of the file.
+# NOTE: NO `USER runner` directive — the entrypoint starts as root so
+# it can stat the docker socket for the host GID and use setpriv to
+# drop to `runner` with that GID added to the supplementary group set.
+# Doing this in entrypoint rather than the Dockerfile means the GID
+# is discovered fresh each start, removing the need for a manually-
+# tuned DOCKER_GID in .env (it stays as a documented fallback).
+#
+# The container is still locked down at runtime via the compose
+# file's `cap_drop: [ALL]` + minimal cap_add + `no-new-privileges` +
+# `read_only: true`. setpriv only needs CAP_SETUID and CAP_SETGID,
+# both of which are in the cap_add list.
 WORKDIR ${RUNNER_HOME}
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
