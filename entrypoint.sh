@@ -15,6 +15,9 @@
 #       to talk to the mounted docker socket.
 #
 #   Phase 2 (runner) — runs only when EUID is NOT 0:
+#     - Resolve the registration target (repo / org / enterprise
+#       scope) from RUNNER_SCOPE + the matching env vars. Build the
+#       GitHub API base URL + the --url arg for config.sh.
 #     - Mint a fresh registration token from the GitHub API using
 #       the long-lived PAT in $GITHUB_PAT.
 #     - Run ./config.sh to register the runner.
@@ -108,7 +111,8 @@ if [ "$(id -u)" -eq 0 ]; then
     # at this point the container only has those four caps anyway.
     #
     # --preserve-environment: keep GITHUB_PAT, GITHUB_OWNER,
-    # GITHUB_REPO, RUNNER_NAME, RUNNER_LABELS etc. through the re-exec.
+    # GITHUB_REPO, RUNNER_NAME, RUNNER_LABELS, RUNNER_SCOPE etc.
+    # through the re-exec.
     exec setpriv \
         --reuid=runner \
         --regid=runner \
@@ -122,9 +126,7 @@ fi
 # Phase 2 — runner user
 # ─────────────────────────────────────────────────────────────────
 
-: "${GITHUB_PAT:?GITHUB_PAT must be set (classic PAT with 'repo' scope, or fine-grained with 'Administration: write')}"
-: "${GITHUB_OWNER:?GITHUB_OWNER must be set (e.g. your-org)}"
-: "${GITHUB_REPO:?GITHUB_REPO must be set (e.g. your-repo)}"
+: "${GITHUB_PAT:?GITHUB_PAT must be set (see .env.example for the scope-specific PAT requirements)}"
 : "${RUNNER_NAME:?RUNNER_NAME must be set (e.g. vps-1)}"
 : "${RUNNER_LABELS:?RUNNER_LABELS must be set (e.g. self-hosted-pool)}"
 
@@ -134,8 +136,42 @@ fi
 export HOME="${RUNNER_HOME:-/runner}"
 cd "${HOME}"
 
-REPO_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}"
-API_BASE="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runners"
+# Scope selects which GitHub API endpoint we register against:
+#   repo       — single repository (default; backward compat with v1.0/1.1)
+#   org        — entire org; any repo in the org can use the runner
+#   enterprise — entire enterprise (cross-org); requires enterprise admin
+#
+# `repo` is the default for compatibility — existing .env files that
+# pre-date this knob keep working unchanged.
+RUNNER_SCOPE="${RUNNER_SCOPE:-repo}"
+
+case "${RUNNER_SCOPE}" in
+    repo)
+        : "${GITHUB_OWNER:?GITHUB_OWNER must be set for repo scope (e.g. your-org)}"
+        : "${GITHUB_REPO:?GITHUB_REPO must be set for repo scope (e.g. your-repo)}"
+        REPO_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}"
+        API_BASE="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runners"
+        ;;
+    org)
+        # `GITHUB_OWNER` is reused as the org name — saves introducing
+        # another env var with overlapping semantics. PAT scope is
+        # different though (admin:org / Self-hosted runners: write).
+        : "${GITHUB_OWNER:?GITHUB_OWNER must be set for org scope (the org login, e.g. your-org)}"
+        REPO_URL="https://github.com/${GITHUB_OWNER}"
+        API_BASE="https://api.github.com/orgs/${GITHUB_OWNER}/actions/runners"
+        ;;
+    enterprise)
+        # GitHub enterprises live in their own URL namespace
+        # (github.com/enterprises/<slug>) so we use a dedicated env var.
+        : "${GITHUB_ENTERPRISE:?GITHUB_ENTERPRISE must be set for enterprise scope (the enterprise slug)}"
+        REPO_URL="https://github.com/enterprises/${GITHUB_ENTERPRISE}"
+        API_BASE="https://api.github.com/enterprises/${GITHUB_ENTERPRISE}/actions/runners"
+        ;;
+    *)
+        echo "[entrypoint] FATAL: invalid RUNNER_SCOPE='${RUNNER_SCOPE}' (must be one of: repo, org, enterprise)" >&2
+        exit 1
+        ;;
+esac
 
 # Stash the PAT in a file the agent's child processes can't read.
 # The runner user (UID 1001) is the only one in the container who
@@ -150,7 +186,7 @@ umask 077
 printf '%s' "${GITHUB_PAT}" > "${PAT_FILE}"
 chmod 0400 "${PAT_FILE}"
 
-echo "[entrypoint] minting registration token for ${REPO_URL}"
+echo "[entrypoint] minting registration token for ${REPO_URL} (scope=${RUNNER_SCOPE})"
 REG_TOKEN=$(curl -fsSL \
     -X POST \
     -H "Accept: application/vnd.github+json" \
@@ -160,7 +196,14 @@ REG_TOKEN=$(curl -fsSL \
     | jq -r .token)
 
 if [ -z "${REG_TOKEN}" ] || [ "${REG_TOKEN}" = "null" ]; then
-    echo "[entrypoint] FATAL: failed to mint registration token (verify PAT scopes: classic 'repo', fine-grained 'Administration: write')" >&2
+    case "${RUNNER_SCOPE}" in
+        repo)
+            echo "[entrypoint] FATAL: failed to mint registration token (verify PAT scopes: classic 'repo', fine-grained 'Administration: write' on the repo)" >&2 ;;
+        org)
+            echo "[entrypoint] FATAL: failed to mint registration token (verify PAT scopes: classic 'admin:org', fine-grained org-level 'Self-hosted runners: write')" >&2 ;;
+        enterprise)
+            echo "[entrypoint] FATAL: failed to mint registration token (PAT must belong to an enterprise admin with 'manage_runners:enterprise' permission)" >&2 ;;
+    esac
     exit 1
 fi
 

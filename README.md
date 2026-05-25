@@ -11,6 +11,7 @@ Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 V
 ## Contents
 
 - [Quick start](#quick-start)
+- [Which scope: repo, org, or enterprise?](#which-scope-repo-org-or-enterprise)
 - [Deployment in detail](#deployment-in-detail)
   - [Compose deploy](#compose-deploy)
   - [Systemd timer for daily recycle](#systemd-timer-for-daily-recycle)
@@ -41,6 +42,32 @@ Your repo's **Settings → Actions → Runners** should now show the runner as *
 
 ---
 
+## Which scope: repo, org, or enterprise?
+
+`RUNNER_SCOPE` controls where GitHub registers the runner. Pick the smallest scope that fits your workload — broader scopes ask for broader PAT grants.
+
+| Scope | Use when | Required `.env` vars | PAT requirement |
+|---|---|---|---|
+| **`repo`** _(default)_ | One repo, or a few repos each happy with their own runner. Simplest blast radius — a PAT leak only registers runners on that one repo. | `GITHUB_OWNER` + `GITHUB_REPO` | Classic: `repo`. Fine-grained: `Administration: write` on the target repo. |
+| **`org`** | Multiple repos in one org sharing a single runner pool. One VPS, one runner, picks up jobs from any repo in the org. | `GITHUB_OWNER` _(the org login)_ | Classic: `admin:org`. Fine-grained: org-level `Self-hosted runners: write`. |
+| **`enterprise`** | Cross-org runner pool on GHEC / GHES enterprise. Rare outside of large GH Enterprise customers. | `GITHUB_ENTERPRISE` _(the slug from `github.com/enterprises/<slug>`)_ | Enterprise admin PAT with `manage_runners:enterprise`. |
+
+Default behaviour (RUNNER_SCOPE unset or `repo`) is byte-identical to v1.1 — existing deployments keep working without `.env` edits.
+
+### Picking between repo and org
+
+If you currently run one toolkit instance per repo, switching to `RUNNER_SCOPE=org` collapses N runners → 1. Trade-off: a compromised workflow in **any** org repo can pwn the host via the docker socket (still the headline risk; see [What you trade off](#what-you-trade-off)). Org scope amortises that risk across more code paths — fine for trusted internal orgs, bad for orgs with public-facing repos that take outside PRs.
+
+### Picking between org and enterprise
+
+Enterprise scope is mostly for very large GHEC / GHES customers who need a single runner pool serving multiple orgs. For everyone else, prefer `org` — the PAT requirements are less invasive.
+
+### Runner groups (out of scope here)
+
+If you need to restrict which repos in an org are allowed to use a given runner, GitHub's **runner groups** are the right primitive. Configure on the GitHub side (Settings → Actions → Runner groups). The toolkit doesn't need to know — `actions/runner` picks up the org's default group at registration.
+
+---
+
 ## Deployment in detail
 
 ### Compose deploy
@@ -52,7 +79,7 @@ Your repo's **Settings → Actions → Runners** should now show the runner as *
    cd /opt/gha-runner-toolkit
    ```
 
-2. **Configure `.env`.** Copy the template and fill it in. The required values are `GITHUB_PAT`, `GITHUB_OWNER`, `GITHUB_REPO`, `RUNNER_NAME`, `RUNNER_LABELS`. Everything else is optional with sensible defaults. See [Configuration reference](#configuration-reference) for the full list.
+2. **Configure `.env`.** Copy the template and fill it in. Required values are `GITHUB_PAT`, `RUNNER_NAME`, `RUNNER_LABELS`, plus the coordinate vars for your chosen `RUNNER_SCOPE` (default `repo` needs `GITHUB_OWNER` + `GITHUB_REPO`; see [Which scope?](#which-scope-repo-org-or-enterprise) for `org` / `enterprise`). Everything else is optional with sensible defaults (including `DOCKER_GID` — auto-detected since v1.2). [Configuration reference](#configuration-reference) lists the optional knobs.
 
    ```sh
    cp .env.example .env
@@ -128,16 +155,23 @@ All settings live in `.env` next to the compose file. `.env.example` carries the
 
 | Variable | What it does |
 |---|---|
-| `GITHUB_PAT` | Classic PAT with `repo` scope, or fine-grained with `Administration: write`. Used to mint short-lived registration + removal tokens at runtime. **Don't commit this.** |
-| `GITHUB_OWNER` | Repo owner (org or user). |
-| `GITHUB_REPO` | Repo name (without the owner prefix). |
-| `RUNNER_NAME` | Stable identifier shown in the repo's Actions → Runners settings. Unique per registered instance. |
+| `GITHUB_PAT` | Used to mint short-lived registration + removal tokens at runtime. Required PAT scope depends on `RUNNER_SCOPE` — see [Which scope?](#which-scope-repo-org-or-enterprise). **Don't commit this.** |
+| `RUNNER_NAME` | Stable identifier shown in the GitHub Actions → Runners settings. Unique per registered instance. |
 | `RUNNER_LABELS` | Comma-separated labels workflows can target via `runs-on: [self-hosted, linux, <label>]`. `self-hosted`, `Linux`, `X64` are added automatically. |
+
+Additionally, **one of** the following coordinate sets based on `RUNNER_SCOPE`:
+
+| `RUNNER_SCOPE` | Required coordinate vars |
+|---|---|
+| `repo` _(default)_ | `GITHUB_OWNER` + `GITHUB_REPO` |
+| `org` | `GITHUB_OWNER` _(the org login)_ |
+| `enterprise` | `GITHUB_ENTERPRISE` _(slug from `github.com/enterprises/<slug>`)_ |
 
 ### Optional knobs
 
 | Variable | Default | What it does |
 |---|---|---|
+| `RUNNER_SCOPE` | `repo` | Which GitHub API endpoint the runner registers against. `repo` / `org` / `enterprise`. See [Which scope?](#which-scope-repo-org-or-enterprise) for the trade-offs. |
 | `DOCKER_GID` | _auto-detected_ | Host's docker group GID. Auto-detected from the mounted socket at start time (v1.2+); set this only if auto-detect fails. Discover via `getent group docker \| cut -d: -f3` on the host. Typical: `999` on Linux, `0` on Docker Desktop. |
 | `CONTAINER_NAME` | `gha-runner` | Override when running multiple instances on one host (each must be unique). Must match the compose file's `container_name`. |
 | `RECYCLE_DRAIN_TIMEOUT_SECONDS` | `600` | Hard ceiling for waiting on an in-flight job before forcing recycle. Bump if your jobs routinely exceed 10 min. |

@@ -76,6 +76,24 @@ NOTIFY_WEBHOOK="${RECYCLE_NOTIFY_WEBHOOK:-}"
 # this recycle and switch to log-grep fallback.
 API_MAX_FAILURES="${RECYCLE_API_MAX_FAILURES:-3}"
 
+# Resolve the busy-check API endpoint based on RUNNER_SCOPE. Must
+# match the scope used by entrypoint.sh — recycle.sh queries the
+# same `actions/runners` collection that the agent registered into.
+# Default `repo` keeps behaviour identical for pre-RUNNER_SCOPE
+# .env files.
+RUNNER_SCOPE="${RUNNER_SCOPE:-repo}"
+case "${RUNNER_SCOPE}" in
+    repo)
+        RUNNERS_API="https://api.github.com/repos/${GITHUB_OWNER:-}/${GITHUB_REPO:-}/actions/runners" ;;
+    org)
+        RUNNERS_API="https://api.github.com/orgs/${GITHUB_OWNER:-}/actions/runners" ;;
+    enterprise)
+        RUNNERS_API="https://api.github.com/enterprises/${GITHUB_ENTERPRISE:-}/actions/runners" ;;
+    *)
+        echo "[recycle $(date -u +%Y-%m-%dT%H:%M:%SZ)] FATAL: invalid RUNNER_SCOPE='${RUNNER_SCOPE}' (must be one of: repo, org, enterprise)" >&2
+        exit 1 ;;
+esac
+
 log() {
     echo "[recycle $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
 }
@@ -150,7 +168,7 @@ runner_busy_state() {
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer ${GITHUB_PAT:-}" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
-        "https://api.github.com/repos/${GITHUB_OWNER:-}/${GITHUB_REPO:-}/actions/runners" 2>/dev/null) \
+        "${RUNNERS_API}" 2>/dev/null) \
         || { log_warn "GH API: curl failed (network/timeout)"; return 2; }
     status="${response##*$'\n'}"
     body="${response%$'\n'*}"
@@ -164,7 +182,7 @@ runner_busy_state() {
             log_warn  "GH API: 403 — likely rate-limited or PAT scopes insufficient"
             return 2 ;;
         404)
-            log_error "GH API: 404 — repo ${GITHUB_OWNER:-?}/${GITHUB_REPO:-?} not found or PAT can't see it"
+            log_error "GH API: 404 — registration target not found or PAT can't see it (scope=${RUNNER_SCOPE}, url=${RUNNERS_API})"
             return 2 ;;
         5*)
             log_warn  "GH API: ${status} server error (transient)"
