@@ -1,0 +1,10 @@
+# Default owner for all paths. Required-reviewer assignment when
+# branch protection's "require review from CODEOWNERS" is on.
+* @endbossai
+
+# Security-sensitive areas — the maintainer needs to see changes
+# here even when delegating other reviews later.
+/Dockerfile @endbossai
+/entrypoint.sh @endbossai
+/.github/ @endbossai
+/SECURITY.md @endbossai

@@ -1,0 +1,70 @@
+name: Bug report
+description: Something's broken in the runner image, scripts, or docs.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! The more of these fields you can fill, the faster we can triage.
+
+        **Security issue?** Please don't open a public issue — use [private vulnerability reporting](https://github.com/endbossai/gha-runner-toolkit/security/advisories/new) instead. See [SECURITY.md](https://github.com/endbossai/gha-runner-toolkit/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Toolkit version
+      description: The image tag you're running (e.g. `1.1.0`).
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host OS + Docker version
+      description: "`uname -a` and `docker --version` from the host."
+      placeholder: "Ubuntu 24.04.2 LTS, Docker 28.0.1"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you see?
+      placeholder: |
+        1. Ran `docker compose up -d`
+        2. Container kept restarting
+        3. Logs showed ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      placeholder: "Container should reach 'Listening for Jobs' and stay there."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "Output of `docker compose logs --tail 100 runner`, `journalctl -u recycle.service`, etc. Redact any PATs or secrets."
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: env-redacted
+    attributes:
+      label: Redacted .env
+      description: "Your `.env` with the PAT scrubbed. Helps catch config mismatches."
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: ack
+    attributes:
+      label: Confirmations
+      options:
+        - label: I'm running on a **private** repo (this toolkit is not designed for public-repo use)
+          required: true
+        - label: I checked [docs/runbook.md](https://github.com/endbossai/gha-runner-toolkit/blob/main/docs/runbook.md) — my issue isn't covered there
+          required: true

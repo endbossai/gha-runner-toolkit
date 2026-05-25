@@ -1,0 +1,111 @@
+# PR validation. Runs on every pull_request and on pushes to main.
+#
+# Third-party actions are SHA-pinned with a # version comment per
+# the supply-chain hygiene this project itself preaches. To bump,
+# follow the same recipe used in the Dockerfile's ARG pins:
+#   1. Find the desired release tag in the upstream repo
+#   2. Resolve the tag to a commit SHA (gh api or via release page)
+#   3. Update both the pin and the # comment
+# Dependabot's `github-actions` ecosystem handles this automatically.
+
+name: pr
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Dockerfile linting. Catches common mistakes (latest tags, useless
+  # cats, bad apt patterns) before they land.
+  hadolint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          # DL3008 (pin apt versions): we'd need to pin every system
+          # package, which is enormous churn for marginal benefit on
+          # an ubuntu LTS base. Acceptable trade-off; the base image
+          # digest pin is the real supply-chain anchor.
+          # DL3009 (delete apt lists): we do, but in a separate command;
+          # the linter doesn't catch the multi-line RUN.
+          ignore: DL3008,DL3009
+
+  # Shell script linting. The runner ships two long-running shell
+  # scripts (entrypoint + recycle) so the linter catches real bugs.
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        env:
+          # /var/run/docker.sock paths get false-positive SC2086 etc;
+          # entrypoint quotes them properly.
+          SHELLCHECK_OPTS: "-x"
+
+  # Markdown lint. Same rule set as the consuming projects expect;
+  # bumps to upstream markdownlint-cli2 land via Dependabot.
+  markdownlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: DavidAnson/markdownlint-cli2-action@ded1f9488f68a970bc66ea5619e13e9b52e601cd # v23.2.0
+        with:
+          globs: |
+            **/*.md
+            !**/node_modules
+
+  # Compose file syntax + interpolation check. Catches typos in env
+  # var names, malformed YAML, etc., before they break a deploy.
+  compose-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate docker-compose.yml syntax
+        # `config --quiet` parses + resolves env vars + exits 0 if
+        # the rendered compose is valid. We supply the same env vars
+        # we expect operators to set, with dummy values, to exercise
+        # the full interpolation path.
+        run: |
+          cat > .env <<EOF
+          GITHUB_PAT=dummy
+          GITHUB_OWNER=dummy
+          GITHUB_REPO=dummy
+          RUNNER_NAME=dummy
+          RUNNER_LABELS=dummy
+          DOCKER_GID=999
+          EOF
+          docker compose config --quiet
+
+  # Smoke build of the Dockerfile to catch broken builds before they
+  # hit the publish workflow on a tag. We don't actually run the
+  # container — just verify the image builds. Buildx cache shaves
+  # subsequent runs.
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - name: Build (load locally, don't push)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          load: true
+          tags: gha-runner-toolkit:pr-smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

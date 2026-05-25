@@ -3,16 +3,21 @@
 # Tag flow:
 #   1. Land changes on main
 #   2. `git tag v1.x.y && git push --tags`     (use the `v` prefix on git tags)
-#   3. This workflow fires, builds + pushes (note: docker/metadata-action
-#      strips the `v` per Docker conventions, so image tags are `1.x.y`):
-#        ghcr.io/endbossai/gha-runner-toolkit:1.x.y
-#        ghcr.io/endbossai/gha-runner-toolkit:1.x         (rolling minor)
-#        ghcr.io/endbossai/gha-runner-toolkit:1           (rolling major)
-#        ghcr.io/endbossai/gha-runner-toolkit:latest      (rolling, NOT for prod)
+#   3. This workflow fires:
+#        a. Build the image locally
+#        b. Trivy scan — fail on HIGH/CRITICAL CVEs (we don't ship known-bad)
+#        c. Push to GHCR with semver-derived tags:
+#             ghcr.io/endbossai/gha-runner-toolkit:1.x.y
+#             ghcr.io/endbossai/gha-runner-toolkit:1.x      (rolling minor)
+#             ghcr.io/endbossai/gha-runner-toolkit:1        (rolling major)
+#             ghcr.io/endbossai/gha-runner-toolkit:latest   (rolling)
 #
 # Consumers should pin a specific `MAJOR.MINOR.PATCH` tag in their
-# docker-compose.yml. The rolling tags exist for easy upgrade paths
+# docker-compose.yml. Rolling tags exist for easy upgrade paths
 # inside a major; `latest` exists for tinkering only.
+#
+# Note: docker/metadata-action strips the leading `v` from git tags
+# per Docker conventions. Image tags are `1.x.y`, not `v1.x.y`.
 
 name: publish
 
@@ -34,15 +39,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -50,7 +55,7 @@ jobs:
 
       - name: Extract metadata (tags, labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/gha-runner-toolkit
           tags: |
@@ -59,8 +64,59 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest
 
-      - name: Build + push
-        uses: docker/build-push-action@v6
+      # Two-stage build: load locally for Trivy scanning, then build-
+      # and-push if the scan passes. Both invocations hit the same gha
+      # buildx cache so the second is fast.
+      - name: Build (load locally for Trivy scan)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          load: true
+          tags: gha-runner-toolkit:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Trivy SARIF emission — full-severity, archival, never fails.
+      # GHCR auth via TRIVY_USERNAME/PASSWORD env vars lifts the 1-req/
+      # IP/hour anonymous DB-pull rate-limit. Same dance the consumer
+      # workflows do; details documented in their workflow file.
+      - name: Trivy SARIF emission (archive, never fails)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: gha-runner-toolkit:scan
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF artifact
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-image-scan
+          path: trivy-results.sarif
+          retention-days: 30
+
+      # Gate the publish on a clean CRITICAL/HIGH scan. Trivy's
+      # severity filter is split from the SARIF emission above so the
+      # archive is always complete; only the gate step fails the build.
+      # skip-setup-trivy reuses the DB the prior step downloaded.
+      - name: Trivy severity gate (fails on CRITICAL or HIGH)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: gha-runner-toolkit:scan
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          format: table
+          skip-setup-trivy: "true"
+
+      - name: Build + push to GHCR
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           push: true

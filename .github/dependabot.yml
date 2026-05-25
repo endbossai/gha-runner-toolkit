@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  # GitHub Actions used in this repo's own workflows. SHA-pinned in
+  # the .yml files; Dependabot opens PRs that bump the SHA and the
+  # `# vX.Y.Z` trailing comment in lock-step.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Docker base image. Dependabot doesn't natively understand the
+  # `actions/runner` tarball download in the Dockerfile, so it can't
+  # auto-bump that pin — runner version bumps happen via a manual PR.
+  # But this watches the ubuntu:24.04 digest and proposes a new pin
+  # when the upstream image rebuilds with security patches.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "chore"

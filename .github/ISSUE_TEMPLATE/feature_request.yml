@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose an addition or enhancement.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you fill this in: please skim [CONTRIBUTING.md §Scope](https://github.com/endbossai/gha-runner-toolkit/blob/main/CONTRIBUTING.md#scope) to confirm your idea is within scope. If it pulls toward Kubernetes-scale runner orchestration, [`actions-runner-controller`](https://github.com/actions/actions-runner-controller) is the right home.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The use case, not the implementation.
+      placeholder: "I'm running 3 runners on one host and the recycle.timer fires all three at the same time, dead-zoning my CI for 2 minutes."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Your proposed approach (optional)
+      description: If you have a specific design in mind. Skip if not.
+      placeholder: "RandomizedDelaySec is already there but only 5 min. Bump to 30 min OR add a stagger env var."
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      placeholder: "I could stagger them manually by editing each timer's OnCalendar, but that breaks on upgrade."
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This fits the "small-team / single-VPS" scope per CONTRIBUTING.md
+          required: true

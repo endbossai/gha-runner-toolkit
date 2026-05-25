@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report (private)
+    url: https://github.com/endbossai/gha-runner-toolkit/security/advisories/new
+    about: Don't open a public issue for vulnerabilities. Use private vulnerability reporting.
+  - name: Discussions
+    url: https://github.com/endbossai/gha-runner-toolkit/discussions
+    about: Questions, brainstorming, or anything that isn't a concrete bug or feature request.
