@@ -19,10 +19,13 @@ services:
   # iterating on the Dockerfile — comment out the `image:` line and
   # uncomment `build:`. Both shapes work; pick one.
   runner:
-    image: ghcr.io/endbossai/gha-runner-toolkit:1.0.0
+    image: ghcr.io/endbossai/gha-runner-toolkit:1.1.0
     # build:
     #   context: .
-    container_name: gha-runner
+    # CONTAINER_NAME from .env (default `gha-runner`). Override when
+    # running multiple instances on one host — each instance needs a
+    # unique container_name. Must match recycle.sh's CONTAINER_NAME.
+    container_name: ${CONTAINER_NAME:-gha-runner}
     restart: unless-stopped
     env_file:
       - .env

@@ -22,19 +22,13 @@
 set -euo pipefail
 
 COMPOSE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTAINER="gha-runner"
-DRAIN_TIMEOUT_SECONDS=600
-DRAIN_POLL_SECONDS=30
 
 cd "${COMPOSE_DIR}"
 
-log() {
-    echo "[recycle $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
-}
-
-# Source .env to get the PAT + repo coords. recycle.sh is invoked by
-# systemd outside any container, so it needs its own copy of the
-# credentials. .env is gitignored and lives next to this script.
+# Source .env to get the PAT + repo coords + any optional knobs.
+# recycle.sh is invoked by systemd outside any container, so it
+# needs its own copy of the credentials. .env is gitignored and
+# lives next to this script.
 #
 # Read into local-only vars (no `set -a` / no `export`) so the PAT
 # doesn't propagate into curl/jq/docker child processes' env, and a
@@ -43,6 +37,41 @@ if [ -f "${COMPOSE_DIR}/.env" ]; then
     # shellcheck disable=SC1091
     . "${COMPOSE_DIR}/.env"
 fi
+
+# Tunables — env override (typically via .env), with sensible
+# defaults. Any of these can stay unset and you get reasonable
+# behaviour for the small-team / single-VPS case.
+#
+#   CONTAINER_NAME                  — must match docker-compose.yml's
+#                                     container_name. Defaults to
+#                                     `gha-runner`. Override when
+#                                     running multiple instances on
+#                                     one host.
+#   RECYCLE_DRAIN_TIMEOUT_SECONDS   — hard ceiling on how long we
+#                                     wait for an in-flight job to
+#                                     finish before forcing recycle.
+#                                     Default 600 (10 min). Bump if
+#                                     your jobs routinely run longer
+#                                     than that and you'd rather wait
+#                                     than kill them.
+#   RECYCLE_DRAIN_POLL_SECONDS      — how often we re-query the
+#                                     GitHub API for busy-state.
+#                                     Default 30s. Tighten only if
+#                                     you have very short jobs.
+#   RECYCLE_PRUNE_FILTER            — `docker container prune` filter
+#                                     for orphan testcontainers.
+#                                     Default `until=24h`. Set
+#                                     "until=0" to skip prune; set
+#                                     a shorter window for hosts
+#                                     with disk pressure.
+CONTAINER="${CONTAINER_NAME:-gha-runner}"
+DRAIN_TIMEOUT_SECONDS="${RECYCLE_DRAIN_TIMEOUT_SECONDS:-600}"
+DRAIN_POLL_SECONDS="${RECYCLE_DRAIN_POLL_SECONDS:-30}"
+PRUNE_FILTER="${RECYCLE_PRUNE_FILTER:-until=24h}"
+
+log() {
+    echo "[recycle $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+}
 
 # Query the GitHub API for this runner's busy state. Returns 0 if
 # idle, 1 if busy, 2 if the API call itself failed (caller decides
@@ -121,10 +150,14 @@ docker compose up -d
 
 # Clear orphan testcontainers. With Ryuk disabled (see docker-compose
 # environment block), a crashed test run can leave Postgres / Kafka
-# / Trivy-scan sidecars behind. We prune containers stopped for >24h
-# so an in-flight job on another runner instance isn't affected, but
-# yesterday's orphans get cleared.
-log "docker container prune (orphan testcontainers > 24h)"
-docker container prune -f --filter "until=24h" 2>&1 || log "container prune failed; continuing"
+# / Trivy-scan sidecars behind. The default filter prunes containers
+# stopped for >24h so an in-flight job on another runner instance
+# isn't affected. Set RECYCLE_PRUNE_FILTER=until=0 in .env to skip.
+if [ "${PRUNE_FILTER}" = "until=0" ]; then
+    log "docker container prune skipped (RECYCLE_PRUNE_FILTER=until=0)"
+else
+    log "docker container prune --filter ${PRUNE_FILTER}"
+    docker container prune -f --filter "${PRUNE_FILTER}" 2>&1 || log "container prune failed; continuing"
+fi
 
 log "recycle complete"
