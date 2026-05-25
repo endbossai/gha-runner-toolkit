@@ -4,7 +4,7 @@ A production-grade self-hosted GitHub Actions runner, packaged for the small-tea
 
 Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 VPS and have it just work. Daily container recycle keeps state bounded. The non-obvious gotchas — libicu version skew on Ubuntu LTS, Testcontainers Ryuk + host networking, docker.sock GID discovery, stale-session recovery — are already solved.
 
-> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.1.1` — adds container hardening (`read_only`, dropped capabilities, `no-new-privileges`), auto-detects `DOCKER_GID`, ships richer recycle observability with an optional webhook for drain-timeout alerts, plus `RUNNER_SCOPE` for org / enterprise registration. Base image bumped to Ubuntu 26.04. See [Security posture](#security-posture).
+> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.1.2` — same v1.1.1 feature set, plus an auto-registered `runner-toolkit-<version>` label so the GitHub UI tells you which image each runner is on at a glance. See [Security posture](#security-posture).
 >
 > See [Versioning](#versioning) for the tagging scheme; [Upgrading](#upgrading) for the bump procedure.
 
@@ -237,12 +237,13 @@ If auto-detection fails (socket not mounted, exotic stat failures), the entrypoi
 ## What you get
 
 - **Containerised** — runner agent lives in a Docker container. The container's filesystem dies daily; no long-tail state accumulates.
-- **Hardened by default (v1.2)** — `read_only: true`, `cap_drop: ALL` with a four-cap allowlist, `no-new-privileges`, agent state on tmpfs. See [Security posture](#security-posture).
+- **Hardened by default** — `read_only: true`, `cap_drop: ALL` with a four-cap allowlist, `no-new-privileges`, agent state on tmpfs. See [Security posture](#security-posture).
+- **Auto-labelled by version** — every registered runner gets a `runner-toolkit-<version>` label (e.g. `runner-toolkit-1.1.2`) baked in at image-build time. The GitHub Actions Runners page tells you which image each runner is on without SSHing into the VPS.
 - **Daily recycle** — systemd timer drains (≤10 min waiting on in-flight job, via the GitHub API's `busy` field) then `docker compose down && compose pull && compose up -d`. Bounds disk growth and picks up the latest published image automatically. Optional webhook fires on drain-timeout.
 - **Drain-then-replace** — GitHub-API-based busy check is unforgeable; a malicious workflow can't fake "idle" via its stdout. Per-status error classification (401, 403, 5xx, etc.); log-grep fallback after `RECYCLE_API_MAX_FAILURES` API errors.
 - **Bounded state** — Gradle / Maven / Docker layer caches live inside the container, die with it. Worst case: one day's worth of caches.
-- **Supply-chain pinned** — `ubuntu:24.04` by digest, `actions/runner` by version + SHA256 verification on the tarball. Bumps ride a deliberate Dockerfile edit, not a runtime auto-update.
-- **Pre-installed**: Docker CLI (talks to mounted host socket), Node ≥ 20, git, curl, jq. JDKs aren't baked — `actions/setup-java` in workflows handles version selection and caches inside the container's day-long lifetime.
+- **Supply-chain pinned** — `ubuntu:26.04` by digest, `actions/runner` by version + SHA256 verification on the tarball. Bumps ride a deliberate Dockerfile edit, not a runtime auto-update.
+- **Pre-installed**: Docker CLI (talks to mounted host socket), Node ≥ 22, git, curl, jq. JDKs aren't baked — `actions/setup-java` in workflows handles version selection and caches inside the container's day-long lifetime.
 
 ## What you trade off
 

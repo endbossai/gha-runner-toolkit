@@ -67,12 +67,20 @@ jobs:
       # Two-stage build: load locally for Trivy scanning, then build-
       # and-push if the scan passes. Both invocations hit the same gha
       # buildx cache so the second is fast.
+      #
+      # TOOLKIT_VERSION build-arg gets baked into the image as an ENV
+      # so the entrypoint can auto-add a `runner-toolkit-<version>`
+      # label at registration time. metadata-action's `version` output
+      # is the resolved semver (e.g. `1.1.2`) — the `v` prefix is
+      # already stripped per Docker tag conventions.
       - name: Build (load locally for Trivy scan)
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           load: true
           tags: gha-runner-toolkit:scan
+          build-args: |
+            TOOLKIT_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -122,6 +130,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TOOLKIT_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true

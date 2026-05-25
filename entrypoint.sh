@@ -207,11 +207,24 @@ if [ -z "${REG_TOKEN}" ] || [ "${REG_TOKEN}" = "null" ]; then
     exit 1
 fi
 
+# Append a `runner-toolkit-<version>` label so the GitHub UI shows
+# at a glance which image version each runner is on. TOOLKIT_VERSION
+# is baked at image-build time from a --build-arg fed by the publish
+# workflow's docker/metadata-action (resolved semver, e.g. `1.1.2`).
+#
+# Skip the label entirely when TOOLKIT_VERSION is unset, empty, or
+# `dev` — that's the default for local source builds, and we don't
+# want dev runners to register a misleading version-shaped label.
+final_labels="${RUNNER_LABELS}"
+if [ -n "${TOOLKIT_VERSION:-}" ] && [ "${TOOLKIT_VERSION}" != "dev" ]; then
+    final_labels="${final_labels},runner-toolkit-${TOOLKIT_VERSION}"
+fi
+
 # --replace handles re-registration after a recycle.
 # --disableupdate freezes the runner agent to the version we baked
 # in; upgrades happen via Dockerfile bump + image rebuild, not at
 # runtime. (Supply-chain hygiene; trade-off accepted in README.)
-echo "[entrypoint] registering runner ${RUNNER_NAME} (labels: ${RUNNER_LABELS})"
+echo "[entrypoint] registering runner ${RUNNER_NAME} (labels: ${final_labels})"
 ./config.sh \
     --unattended \
     --replace \
@@ -219,7 +232,7 @@ echo "[entrypoint] registering runner ${RUNNER_NAME} (labels: ${RUNNER_LABELS})"
     --url "${REPO_URL}" \
     --token "${REG_TOKEN}" \
     --name "${RUNNER_NAME}" \
-    --labels "${RUNNER_LABELS}" \
+    --labels "${final_labels}" \
     --work _work
 
 # Drop the registration token + PAT from the shell's env. The trap
