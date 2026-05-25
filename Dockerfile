@@ -43,6 +43,15 @@ ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d2
 # glance what the image bakes in.
 ARG NODE_MAJOR=22
 
+# Toolkit version, baked into the image so the entrypoint can
+# auto-add a `runner-toolkit-<version>` label on the GitHub-side
+# runner registration. The publish workflow passes this via
+# --build-arg from docker/metadata-action's resolved semver
+# (e.g. `1.1.2`). Local source builds default to `dev`, which the
+# entrypoint treats as "skip the version label" — keeps dev runners
+# from showing up alongside real release-pinned ones.
+ARG TOOLKIT_VERSION=dev
+
 # RUNNER_HOME is the runtime work directory. Under v1.2 it's a tmpfs
 # mount populated from RUNNER_DIST at container start (see entrypoint).
 # RUNNER_DIST holds the immutable image-baked copy of the agent
@@ -51,7 +60,8 @@ ARG NODE_MAJOR=22
 # _diag/, _work/) lives on an ephemeral filesystem.
 ENV DEBIAN_FRONTEND=noninteractive \
     RUNNER_HOME=/runner \
-    RUNNER_DIST=/opt/runner-dist
+    RUNNER_DIST=/opt/runner-dist \
+    TOOLKIT_VERSION=${TOOLKIT_VERSION}
 
 # Ubuntu's /bin/sh is `dash`, which doesn't support `set -o pipefail`.
 # Switching SHELL to bash for the build-time RUNs lets the install
