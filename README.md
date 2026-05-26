@@ -4,7 +4,7 @@ A production-grade self-hosted GitHub Actions runner, packaged for the small-tea
 
 Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 VPS and have it just work. Daily container recycle keeps state bounded. The non-obvious gotchas — libicu version skew on Ubuntu LTS, Testcontainers Ryuk + host networking, docker.sock GID discovery, stale-session recovery — are already solved.
 
-> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.1.2` — same v1.1.1 feature set, plus an auto-registered `runner-toolkit-<version>` label so the GitHub UI tells you which image each runner is on at a glance. See [Security posture](#security-posture).
+> **Latest release**: `ghcr.io/endbossai/gha-runner-toolkit:1.2.0` — adds Python 3.12 + 3.13 baked into the image so `actions/setup-python` works on Ubuntu 26.04 without falling off the python-versions manifest (issue #11). See [Pre-installed Python](#pre-installed-python).
 >
 > See [Versioning](#versioning) for the tagging scheme; [Upgrading](#upgrading) for the bump procedure.
 
@@ -20,6 +20,7 @@ Built so you can replace ~$50/month of GitHub-hosted Actions billing with a $5 V
 - [Configuration reference](#configuration-reference)
 - [Verifying the deployment](#verifying-the-deployment)
 - [Security posture](#security-posture)
+- [Pre-installed Python](#pre-installed-python)
 - [What you get](#what-you-get) / [What you trade off](#what-you-trade-off)
 - [Versioning](#versioning) + [Upgrading](#upgrading)
 - [Troubleshooting](#troubleshooting)
@@ -234,6 +235,25 @@ If auto-detection fails (socket not mounted, exotic stat failures), the entrypoi
 
 ---
 
+## Pre-installed Python
+
+`actions/setup-python` on Ubuntu 26.04 hits a dead end out of the box: the action queries the `actions/python-versions` manifest for a prebuilt interpreter matching the runner's reported OS, and the manifest doesn't yet list 26.04 — so every `setup-python` step fails with `The version 'X.Y' with architecture 'x64' was not found for Ubuntu 26.04`.
+
+v1.2 fixes this by baking two portable interpreters into the image at the exact path `setup-python`'s tool-cache lookup expects:
+
+| Version | Source | Tool-cache path |
+|---|---|---|
+| 3.12.13 | `python-build-standalone` (SHA256-pinned) | `/opt/hostedtoolcache/Python/3.12.13/x64/` |
+| 3.13.13 | `python-build-standalone` (SHA256-pinned) | `/opt/hostedtoolcache/Python/3.13.13/x64/` |
+
+`setup-python` finds the cache entry, skips the failing download path, and uses the baked interpreter directly. `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` env vars are both set to `/opt/hostedtoolcache` so the action's lookup hits.
+
+Workflows requesting `3.12` or `3.13` get the exact patch versions above; requesting a minor that isn't baked (e.g. `3.11`) falls through to the download path and currently fails — bake more versions if you need them. To bump or add interpreters, edit the `PYTHON_*_VERSION` / `PYTHON_*_SHA256` ARGs in the [Dockerfile](Dockerfile) using the recipe documented inline.
+
+**Tool cache is writable.** It's mounted as a tmpfs (size 1G) so `pip install -r requirements.txt` against the cached interpreter works without `--user` gymnastics. Like the `/runner` and `/home/runner` tmpfs mounts, the cache dies with the daily recycle — pip caches lasting at most ~24h.
+
+---
+
 ## What you get
 
 - **Containerised** — runner agent lives in a Docker container. The container's filesystem dies daily; no long-tail state accumulates.
@@ -243,7 +263,7 @@ If auto-detection fails (socket not mounted, exotic stat failures), the entrypoi
 - **Drain-then-replace** — GitHub-API-based busy check is unforgeable; a malicious workflow can't fake "idle" via its stdout. Per-status error classification (401, 403, 5xx, etc.); log-grep fallback after `RECYCLE_API_MAX_FAILURES` API errors.
 - **Bounded state** — Gradle / Maven / Docker layer caches live inside the container, die with it. Worst case: one day's worth of caches.
 - **Supply-chain pinned** — `ubuntu:26.04` by digest, `actions/runner` by version + SHA256 verification on the tarball. Bumps ride a deliberate Dockerfile edit, not a runtime auto-update.
-- **Pre-installed**: Docker CLI (talks to mounted host socket), Node ≥ 22, git, curl, jq. JDKs aren't baked — `actions/setup-java` in workflows handles version selection and caches inside the container's day-long lifetime.
+- **Pre-installed**: Docker CLI (talks to mounted host socket), Node ≥ 22, Python 3.12 + 3.13 (in the `actions/setup-python` tool cache), git, curl, jq. JDKs aren't baked — `actions/setup-java` in workflows handles version selection and caches inside the container's day-long lifetime.
 
 ## What you trade off
 
