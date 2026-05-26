@@ -41,6 +41,8 @@ set -euo pipefail
 if [ "$(id -u)" -eq 0 ]; then
     RUNNER_HOME="${RUNNER_HOME:-/runner}"
     RUNNER_DIST="${RUNNER_DIST:-/opt/runner-dist}"
+    RUNNER_TOOL_CACHE="${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}"
+    RUNNER_TOOL_CACHE_DIST="${RUNNER_TOOL_CACHE_DIST:-/opt/hostedtoolcache-dist}"
     DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
 
     log_root() { echo "[entrypoint:root] $*"; }
@@ -90,6 +92,23 @@ if [ "$(id -u)" -eq 0 ]; then
     log_root "populating ${RUNNER_HOME} from ${RUNNER_DIST}"
     cp -R --preserve=mode,timestamps,links "${RUNNER_DIST}/." "${RUNNER_HOME}/"
     chown -R runner:runner "${RUNNER_HOME}"
+
+    # Same dist → tmpfs dance for the actions/setup-* tool cache.
+    # RUNNER_TOOL_CACHE_DIST holds the image-baked Python interpreters
+    # (and any other pre-installed tools we add later). At runtime
+    # RUNNER_TOOL_CACHE is the tmpfs mount that setup-python writes
+    # to when workflows pip-install packages — needs to be writable
+    # for `pip install -r requirements.txt` to work against the
+    # cached interpreter. Skip cleanly if the dist tree isn't present
+    # (e.g. local builds with --build-arg overriding it away, or
+    # future debug images that drop Python).
+    if [ -d "${RUNNER_TOOL_CACHE_DIST}" ]; then
+        log_root "populating ${RUNNER_TOOL_CACHE} from ${RUNNER_TOOL_CACHE_DIST}"
+        cp -R --preserve=mode,timestamps,links "${RUNNER_TOOL_CACHE_DIST}/." "${RUNNER_TOOL_CACHE}/"
+        chown -R runner:runner "${RUNNER_TOOL_CACHE}"
+    else
+        log_root "no ${RUNNER_TOOL_CACHE_DIST} dir found; setup-* actions will fall back to runtime download"
+    fi
 
     # Build the supplementary group list for the runner user. The
     # runner's primary group is gid 1001 (matches the uid from the

@@ -43,6 +43,34 @@ ARG RUNNER_SHA256=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d2
 # glance what the image bakes in.
 ARG NODE_MAJOR=22
 
+# Python toolchain. `actions/setup-python` consults the python-versions
+# manifest to download a prebuilt interpreter matching the runner's
+# detected OS — and that manifest doesn't list Ubuntu 26.04 (yet), so
+# every setup-python step fails on a fresh Noble-Numbat-or-newer base.
+# Workaround: bake portable python-build-standalone interpreters into
+# the image at the exact path setup-python's tool-cache lookup expects
+# (RUNNER_TOOL_CACHE/Python/<X.Y.Z>/<arch>/), with an `<arch>.complete`
+# marker file. setup-python finds the cache entry and skips the
+# download path entirely.
+#
+# To bump versions:
+#   1. Pick a release tag from https://github.com/astral-sh/python-build-standalone/releases
+#   2. Update PYTHON_BUILD_STANDALONE_RELEASE to the date-tagged tag
+#   3. Update PYTHON_3xx_VERSION to the cpython version bundled in
+#      that release for the desired minor line
+#   4. Refresh the SHA256s by fetching
+#      https://github.com/astral-sh/python-build-standalone/releases/download/<release>/SHA256SUMS
+#      and grep'ing for the install_only x86_64-unknown-linux-gnu lines
+#
+# `install_only` is the stripped, optimized build (no debug symbols,
+# no test suite) — ~25MB compressed per version. Full debug builds
+# are 200MB+ each and not worth carrying in a CI runner image.
+ARG PYTHON_BUILD_STANDALONE_RELEASE=20260510
+ARG PYTHON_312_VERSION=3.12.13
+ARG PYTHON_312_SHA256=e7332b4b4bb85006deb48d251c786a04c14de104c9b3a006b33457a4a604b8bc
+ARG PYTHON_313_VERSION=3.13.13
+ARG PYTHON_313_SHA256=928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a8c90ff8407
+
 # Toolkit version, baked into the image so the entrypoint can
 # auto-add a `runner-toolkit-<version>` label on the GitHub-side
 # runner registration. The publish workflow passes this via
@@ -58,9 +86,21 @@ ARG TOOLKIT_VERSION=dev
 # binaries — root-readable, owned by `runner`, copied into the tmpfs
 # at start so the agent's mutable state (.runner, .credentials,
 # _diag/, _work/) lives on an ephemeral filesystem.
+#
+# RUNNER_TOOL_CACHE / AGENT_TOOLSDIRECTORY tell setup-* actions
+# (setup-python, setup-node, setup-java) where to look for pre-baked
+# tooling and where to install new versions. Both names are honored
+# by actions/runner; we set both for belt-and-braces with older
+# action versions. At runtime this path is a tmpfs (populated from
+# RUNNER_TOOL_CACHE_DIST by the entrypoint) so the day's pip / npm /
+# JDK downloads can write into it freely while the container's main
+# FS stays read-only.
 ENV DEBIAN_FRONTEND=noninteractive \
     RUNNER_HOME=/runner \
     RUNNER_DIST=/opt/runner-dist \
+    RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
+    RUNNER_TOOL_CACHE_DIST=/opt/hostedtoolcache-dist \
+    AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache \
     TOOLKIT_VERSION=${TOOLKIT_VERSION}
 
 # Ubuntu's /bin/sh is `dash`, which doesn't support `set -o pipefail`.
@@ -164,6 +204,55 @@ RUN set -euo pipefail; \
     # container starts cleanly. (libicu74 was already installed
     # above to work around the Noble gap.)
     bash ./bin/installdependencies.sh
+
+# Python interpreters for actions/setup-python. We don't apt-install
+# CPython here because Ubuntu 26.04's python3.X packages are still
+# in flux + the python-versions manifest setup-python consults doesn't
+# list Ubuntu 26.04 builds. Instead we stage portable
+# python-build-standalone tarballs at the exact tool-cache path
+# setup-python's `tc.find('Python', <version>, <arch>)` looks at —
+# `RUNNER_TOOL_CACHE_DIST/Python/<X.Y.Z>/<arch>/` with an
+# `<arch>.complete` marker file at the parent level — and let the
+# entrypoint copy the staged tree to the runtime tmpfs at
+# RUNNER_TOOL_CACHE on container start.
+#
+# Why standalone tarballs over deadsnakes / apt: deadsnakes hadn't
+# shipped 26.04 builds at the time of writing, and even when it does
+# the apt-installed layout (system Python at /usr/bin, dist-packages
+# at /usr/lib/python3/...) doesn't match what setup-python expects.
+# python-build-standalone ships a self-contained tree that drops
+# straight into the cache layout — no symlinking, no PATH gymnastics.
+#
+# Both tarballs are SHA256-verified against the release's SHA256SUMS
+# file (supply-chain seatbelt, same posture as the actions/runner
+# pin above). Bump procedure documented at the ARG declarations.
+WORKDIR ${RUNNER_TOOL_CACHE_DIST}/Python
+RUN set -euo pipefail; \
+    for entry in \
+        "${PYTHON_312_VERSION}:${PYTHON_312_SHA256}" \
+        "${PYTHON_313_VERSION}:${PYTHON_313_SHA256}"; \
+    do \
+        version="${entry%%:*}"; \
+        sha="${entry##*:}"; \
+        url="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_BUILD_STANDALONE_RELEASE}/cpython-${version}+${PYTHON_BUILD_STANDALONE_RELEASE}-x86_64-unknown-linux-gnu-install_only.tar.gz"; \
+        tarball="cpython-${version}.tar.gz"; \
+        echo "Fetching CPython ${version} from ${url}"; \
+        curl -fsSL -o "${tarball}" "${url}"; \
+        echo "${sha}  ${tarball}" | sha256sum -c -; \
+        # Tarball extracts to ./python/{bin,lib,include,share}; strip
+        # the `python/` prefix so contents land directly under the
+        # expected RUNNER_TOOL_CACHE/Python/<X.Y.Z>/x64/ leaf.
+        mkdir -p "${version}/x64"; \
+        tar -xzf "${tarball}" -C "${version}/x64" --strip-components=1; \
+        rm "${tarball}"; \
+        # The `<arch>.complete` marker file is what tells
+        # @actions/tool-cache's `tc.find()` that the version is fully
+        # installed (vs a partial copy from an interrupted download).
+        # An empty file is enough; the action only checks for
+        # existence, not contents.
+        touch "${version}/x64.complete"; \
+    done; \
+    chown -R runner:runner "${RUNNER_TOOL_CACHE_DIST}"
 
 # Entrypoint script handles the per-start dance:
 #   1. (root phase) auto-detect host docker GID from the mounted socket,
