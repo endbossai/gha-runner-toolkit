@@ -108,7 +108,7 @@ sudo systemctl enable --now recycle.timer
 systemctl list-timers recycle.timer       # confirms next fire at 03:00 UTC
 ```
 
-`recycle.sh` does drain-then-replace: it polls the GitHub API for the runner's `busy` state, waits up to `RECYCLE_DRAIN_TIMEOUT_SECONDS` (default 600), then `docker compose down && compose pull && compose up -d`, then `docker container prune` to clear orphan testcontainers. Output goes to `journalctl -u recycle.service`.
+`recycle.sh` does drain-then-replace: it polls the GitHub API for the runner's `busy` state, waits up to `RECYCLE_DRAIN_TIMEOUT_SECONDS` (default 600), then `docker compose down && compose pull && compose up -d`, then a reclaim pass that stops+removes running orphan testcontainers (Ryuk is disabled, so crashed test runs leave Postgres/Kafka/etc. sidecars holding memory and connections) and prunes the stopped containers, orphan networks, dangling images, and anonymous volumes they leave behind. Output goes to `journalctl -u recycle.service`.
 
 ### Multi-runner on one host
 
@@ -177,7 +177,8 @@ Additionally, **one of** the following coordinate sets based on `RUNNER_SCOPE`:
 | `CONTAINER_NAME` | `gha-runner` | Override when running multiple instances on one host (each must be unique). Must match the compose file's `container_name`. |
 | `RECYCLE_DRAIN_TIMEOUT_SECONDS` | `600` | Hard ceiling for waiting on an in-flight job before forcing recycle. Bump if your jobs routinely exceed 10 min. |
 | `RECYCLE_DRAIN_POLL_SECONDS` | `30` | How often we re-query the GitHub API for busy-state during drain. |
-| `RECYCLE_PRUNE_FILTER` | `until=24h` | Filter for the post-recycle `docker container prune`. Set `until=0` to skip prune entirely; tighten on disk-pressure hosts. |
+| `RECYCLE_PRUNE_FILTER` | `until=24h` | Age window for the post-recycle reclaim pass (stopped containers, orphan networks, dangling images, and the testcontainer reap below). Set `until=0` to skip reclaim entirely; tighten on disk-pressure hosts. |
+| `RECYCLE_REAP_TESTCONTAINERS` | `true` | Stop+remove RUNNING orphan Testcontainers sidecars (Postgres/Kafka/etc.) left by crashed test runs — the main source of slow memory/connection buildup with Ryuk disabled. Only touches containers labelled `org.testcontainers` and older than `RECYCLE_PRUNE_FILTER`. Set `false` if you run unrelated Testcontainers workloads on the same host. |
 | `RECYCLE_NOTIFY_WEBHOOK` | _unset_ | If set, POST a JSON payload to this URL when the daily drain exceeds `RECYCLE_DRAIN_TIMEOUT_SECONDS` (i.e. a long-running job got force-stopped). Body: `{event, summary, runner, repo, container, timeout_seconds, timestamp}`. Wire into Slack/Discord/Teams inbound webhooks. |
 | `RECYCLE_API_MAX_FAILURES` | `3` | How many consecutive GitHub API failures during drain before we stop trusting the API for this recycle and fall back to log-grep. Bump on flaky links; lower for fail-fast posture. |
 
