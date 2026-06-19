@@ -84,7 +84,10 @@ services:
     # Disabling Ryuk is the standard fix for docker-out-of-docker
     # CI setups. Trade-off: a crashed test run can leave testcontainer
     # sidecars (Postgres, Kafka, etc.) running on the host. Mitigation:
-    # recycle.sh runs `docker container prune` to clear orphans daily.
+    # recycle.sh's daily reclaim pass stops+removes those RUNNING
+    # orphan sidecars (by their `org.testcontainers` label) and prunes
+    # the stopped containers, orphan networks, dangling images, and
+    # anonymous volumes they leave behind.
     #
     # TESTCONTAINERS_HOST_OVERRIDE is the other half of the docker-
     # out-of-docker dance. Testcontainers starts test containers on

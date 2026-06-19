@@ -58,16 +58,30 @@ fi
 #                                     GitHub API for busy-state.
 #                                     Default 30s. Tighten only if
 #                                     you have very short jobs.
-#   RECYCLE_PRUNE_FILTER            — `docker container prune` filter
-#                                     for orphan testcontainers.
+#   RECYCLE_PRUNE_FILTER            — age window for the post-recycle
+#                                     reclaim pass (containers, orphan
+#                                     networks, dangling images).
 #                                     Default `until=24h`. Set
-#                                     "until=0" to skip prune; set
-#                                     a shorter window for hosts
-#                                     with disk pressure.
+#                                     "until=0" to skip reclaim
+#                                     entirely; set a shorter window
+#                                     for hosts with disk pressure.
+#   RECYCLE_REAP_TESTCONTAINERS     — whether to stop+remove RUNNING
+#                                     orphan Testcontainers sidecars
+#                                     (Postgres/Kafka/etc.) left behind
+#                                     by crashed test runs. Default
+#                                     `true`. Only targets containers
+#                                     carrying the `org.testcontainers`
+#                                     label, and only those older than
+#                                     the PRUNE_FILTER window, so a
+#                                     concurrent runner's in-flight job
+#                                     is never killed. Set "false" if
+#                                     you run non-runner Testcontainers
+#                                     workloads on the same host.
 CONTAINER="${CONTAINER_NAME:-gha-runner}"
 DRAIN_TIMEOUT_SECONDS="${RECYCLE_DRAIN_TIMEOUT_SECONDS:-600}"
 DRAIN_POLL_SECONDS="${RECYCLE_DRAIN_POLL_SECONDS:-30}"
 PRUNE_FILTER="${RECYCLE_PRUNE_FILTER:-until=24h}"
+REAP_TESTCONTAINERS="${RECYCLE_REAP_TESTCONTAINERS:-true}"
 NOTIFY_WEBHOOK="${RECYCLE_NOTIFY_WEBHOOK:-}"
 
 # Retry budget for transient GitHub API failures during the drain
@@ -102,6 +116,62 @@ log() {
 # filter on "warning" or "error". structured logs > free-text.
 log_warn()  { log "WARN: $*";  }
 log_error() { log "ERROR: $*"; }
+
+# Convert a `docker prune` until-duration (e.g. `24h`, `30m`, `7d`, a
+# bare `0`) into seconds. Echoes the seconds on success; echoes nothing
+# and returns 1 on a value we don't understand (caller falls back to a
+# conservative default rather than reaping something in-flight).
+duration_to_seconds() {
+    local spec="$1" num unit
+    num="${spec%[smhd]}"
+    unit="${spec##*[0-9]}"
+    [[ "${num}" =~ ^[0-9]+$ ]] || { return 1; }
+    case "${unit}" in
+        ""|s) echo "${num}" ;;
+        m)    echo "$(( num * 60 ))" ;;
+        h)    echo "$(( num * 3600 ))" ;;
+        d)    echo "$(( num * 86400 ))" ;;
+        *)    return 1 ;;
+    esac
+}
+
+# Stop + remove RUNNING orphan Testcontainers sidecars.
+#
+# Why this exists: docker-compose disables Testcontainers Ryuk (its
+# watchdog) because Ryuk's host→container TCP probe can't reach a test
+# process living inside our runner container. The documented trade-off
+# is that a crashed test run leaves its sidecars (Postgres, Kafka, …)
+# behind. `docker container prune` only reaps *stopped* containers, so
+# those still-RUNNING orphans survive every recycle — holding host
+# memory, ports, and network connections until the box is rebooted.
+# That accumulation is the "connections + memory build up over time"
+# symptom this function fixes.
+#
+# Safety: we match ONLY the standard `org.testcontainers=true` label
+# (so the runner itself and unrelated host workloads are never touched)
+# AND only containers older than the reclaim window (so a sibling
+# runner's in-flight test job — whose sidecars are younger than the
+# window — is left alone, mirroring the container-prune contract).
+#   $1 — age threshold in seconds; containers created before
+#        (now - threshold) are reaped.
+reap_orphan_testcontainers() {
+    local age_seconds="$1"
+    local now cutoff id created created_epoch reaped=0
+    now=$(date +%s)
+    cutoff=$(( now - age_seconds ))
+    while IFS= read -r id; do
+        [ -n "${id}" ] || continue
+        created=$(docker inspect -f '{{.Created}}' "${id}" 2>/dev/null) || continue
+        created_epoch=$(date -d "${created}" +%s 2>/dev/null) || continue
+        if [ "${created_epoch}" -lt "${cutoff}" ]; then
+            log "reaping orphan testcontainer ${id} (running, older than reclaim window)"
+            docker stop "${id}" >/dev/null 2>&1 || log_warn "stop ${id} failed"
+            docker rm -f "${id}" >/dev/null 2>&1 || log_warn "rm ${id} failed"
+            reaped=$(( reaped + 1 ))
+        fi
+    done < <(docker ps -q --filter "label=org.testcontainers=true" 2>/dev/null)
+    log "reaped ${reaped} running orphan testcontainer(s)"
+}
 
 # Notify a webhook (Slack/Discord/Teams/anything-JSON). Best-effort:
 # a failed webhook does NOT abort the recycle. The body is a small
@@ -273,17 +343,51 @@ if ! docker compose up -d; then
     exit 1
 fi
 
-# Clear orphan testcontainers. With Ryuk disabled (see docker-compose
-# environment block), a crashed test run can leave Postgres / Kafka
-# / Trivy-scan sidecars behind. The default filter prunes containers
-# stopped for >24h so an in-flight job on another runner instance
-# isn't affected. Set RECYCLE_PRUNE_FILTER=until=0 in .env to skip.
+# Reclaim what a day of CI leaks. With Ryuk disabled (see docker-compose
+# environment block), a crashed test run leaves Postgres / Kafka /
+# Trivy-scan sidecars — plus their networks, anonymous volumes, and the
+# dangling images the daily `compose pull` sheds — orphaned on the host.
+# Left alone these accumulate across recycles into the "connections +
+# memory + cache keep growing" failure mode. This pass clears all of it,
+# scoped to the same age window so an in-flight job on another runner
+# instance isn't affected. Set RECYCLE_PRUNE_FILTER=until=0 to skip.
 if [ "${PRUNE_FILTER}" = "until=0" ]; then
-    log "docker container prune skipped (RECYCLE_PRUNE_FILTER=until=0)"
+    log "reclaim skipped (RECYCLE_PRUNE_FILTER=until=0)"
 else
+    # Reap RUNNING orphan testcontainers first — `container prune` below
+    # only touches stopped ones, so without this their sidecars survive
+    # forever. Derive the age threshold from PRUNE_FILTER's until=<dur>;
+    # fall back to 24h if it's malformed so we never reap aggressively.
+    if [ "${REAP_TESTCONTAINERS}" = "true" ]; then
+        reap_age=$(duration_to_seconds "${PRUNE_FILTER#until=}") \
+            || { log_warn "could not parse PRUNE_FILTER='${PRUNE_FILTER}'; using 24h window for testcontainer reap"; reap_age=86400; }
+        reap_orphan_testcontainers "${reap_age}"
+    else
+        log "testcontainer reap skipped (RECYCLE_REAP_TESTCONTAINERS=${REAP_TESTCONTAINERS})"
+    fi
+
     log "docker container prune --filter ${PRUNE_FILTER}"
     docker container prune -f --filter "${PRUNE_FILTER}" 2>&1 \
         || log_warn "container prune failed; continuing"
+
+    # Orphan networks left by removed testcontainers sessions — these are
+    # the lingering "connections". `network prune` honours the until filter.
+    log "docker network prune --filter ${PRUNE_FILTER}"
+    docker network prune -f --filter "${PRUNE_FILTER}" 2>&1 \
+        || log_warn "network prune failed; continuing"
+
+    # Dangling images shed by the daily `compose pull` (old layers of the
+    # floating tag). until-filtered so a just-pulled image isn't removed.
+    log "docker image prune --filter ${PRUNE_FILTER}"
+    docker image prune -f --filter "${PRUNE_FILTER}" 2>&1 \
+        || log_warn "image prune failed; continuing"
+
+    # Anonymous volumes from reaped sidecars. `volume prune` skips any
+    # volume still attached to a live container, so a concurrent runner's
+    # in-use data is safe; only genuinely-orphaned anonymous volumes go.
+    log "docker volume prune (anonymous, unused)"
+    docker volume prune -f 2>&1 \
+        || log_warn "volume prune failed; continuing"
 fi
 
 log "recycle complete"
